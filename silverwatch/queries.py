@@ -80,9 +80,13 @@ def case_timeline(db: Connection, case_id: str, *, cut: int | None = None,
                  if row["entity_id"] == case_id), None)
     if case is None:
         raise missing("case", case_id)
+    from silverwatch import rounds
+
     return {"case": case["payload"], "case_event": case["seq"],
             "evidence": evidence.for_case(db, case_id, cut=cut),
             "decisions": cases.decisions(db, case_id, cut=cut, as_of=as_of),
+            "review_rounds": rounds.rounds(db, case_id, cut=cut, as_of=as_of),
+            "appeals": rounds.appeals(db, case_id, cut=cut, as_of=as_of),
             "finding": cases.finding(db, case_id, cut=cut, as_of=as_of),
             "remediations": [row for row in cases.current_remediations(db, cut=cut, as_of=as_of)
                              if row["case_id"] == case_id],

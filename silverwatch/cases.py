@@ -3,11 +3,11 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from sqlite3 import Connection
 
-from silverwatch import evidence
+from silverwatch import evidence, rounds
 from silverwatch.contracts import Case, Remediation, ReviewDecision
 from silverwatch.digest import digest
 from silverwatch.errors import conflict, invalid, missing
-from silverwatch.ledger import append, current_entities, latest
+from silverwatch.ledger import append, current_entities
 
 
 def create(db: Connection, body: Case, source_ref: str, revision: int) -> dict:
@@ -27,12 +27,11 @@ def create(db: Connection, body: Case, source_ref: str, revision: int) -> dict:
 
 def decisions(db: Connection, case_id: str, *, cut: int | None = None,
               as_of: datetime | None = None) -> list[dict]:
-    cases = {row["entity_id"] for row in current_entities(db, "case", cut=cut, as_of=as_of)}
-    if case_id not in cases:
-        raise missing("case", case_id)
-    return [row["payload"] | {"event_seq": row["seq"], "digest": row["digest"]}
-            for row in latest(db, "decision", cut=cut, as_of=as_of)
-            if row["entity_id"] == case_id]
+    rows = rounds.decisions_by_round(db, case_id, cut=cut, as_of=as_of)
+    result = []
+    for round_no in sorted(rows):
+        result.extend(rows[round_no])
+    return result
 
 
 def current_cases(db: Connection, *, cut: int | None = None,
@@ -51,20 +50,45 @@ def submit_decision(db: Connection, body: ReviewDecision) -> dict:
     selected = evidence.verify_refs(db, body.case_id, body.evidence_refs, as_of=body.decided_at)
     if body.finding == "substantiated" and any(not row["verified"] for row in selected):
         raise conflict("unverified_evidence", "核实成立须引用已确认的材料")
-    current = decisions(db, body.case_id)
-    existing = next((row for row in current if row["role"] == body.role), None)
+    round_no = body.round
+    current_max_round = rounds.current_round_no(db, body.case_id)
+    if round_no > current_max_round:
+        raise conflict("review_round_missing", "该复核轮次尚未开启，须先登记申诉")
+    grouped = rounds.decisions_by_round(db, body.case_id)
+    round_rows = grouped.get(round_no, [])
     payload = body.model_dump(mode="json")
     fingerprint = digest(payload)
+    existing = next((row for row in round_rows if row["role"] == body.role), None)
     if existing:
         if digest({key: value for key, value in existing.items()
                   if key not in {"event_seq", "digest"}}) != fingerprint:
-            raise conflict("decision_sealed", "该岗位已提交决定，不能重复改写")
+            raise conflict("decision_sealed", "该岗位本轮已提交决定，不能重复改写")
         return {**payload, "digest": fingerprint, "replayed": True}
-    if any(row["reviewer"] == body.reviewer for row in current):
-        raise conflict("reviewer_not_independent", "两项复核必须由不同人员完成")
-    result = append(db, "decision", body.case_id, 1, f"{body.role}:{body.reviewer}",
+    if any(row["reviewer"] == body.reviewer for row in round_rows):
+        raise conflict("reviewer_not_independent", "同一轮两项复核必须由不同人员完成")
+    if round_no >= 2:
+        appeal = next((row["appeal"] for row in rounds.rounds(db, body.case_id)
+                       if row["round"] == round_no), None)
+        if appeal is None:
+            raise conflict("review_round_missing", "该复核轮次尚未开启，须先登记申诉")
+        if body.decided_at <= datetime.fromisoformat(appeal["submitted_at"]):
+            raise invalid("decision_time", "复核决定必须晚于申诉时间")
+    result = append(db, "decision", body.case_id, round_no,
+                    f"round-{round_no}:{body.role}:{body.reviewer}",
                     payload, body.decided_at)
-    return {**payload, **result}
+    stored = {**payload, **result}
+    _reopen_if_finding_changed(db, body.case_id, body.decided_at)
+    return stored
+
+
+def _reopen_if_finding_changed(db: Connection, case_id: str, decided_at: datetime) -> None:
+    history = rounds.rounds(db, case_id)
+    completed = [row for row in history if row["status"] == "complete"]
+    if len(completed) < 2:
+        return
+    previous_finding = completed[-2]["finding"]
+    current_finding = completed[-1]["finding"]
+    rounds.reopen_case(db, case_id, previous_finding, current_finding, decided_at)
 
 
 def combine_findings(case_id: str, rows: list[dict]) -> dict:
@@ -81,13 +105,28 @@ def combine_findings(case_id: str, rows: list[dict]) -> dict:
 
 def finding(db: Connection, case_id: str, *, cut: int | None = None,
             as_of: datetime | None = None) -> dict:
-    return combine_findings(case_id, decisions(db, case_id, cut=cut, as_of=as_of))
+    history = rounds.rounds(db, case_id, cut=cut, as_of=as_of)
+    effective = next((row for row in reversed(history) if row["status"] == "complete"), None)
+    open_round = next((row for row in history
+                       if row["status"] == "open" and row["appeal"] is not None), None)
+    if effective is None:
+        value = "pending"
+        decisions: list[dict] = []
+        effective_round_no = None
+    else:
+        value = effective["finding"]
+        decisions = effective["decisions"]
+        effective_round_no = effective["round"]
+    return {"case_id": case_id, "finding": value, "round": effective_round_no,
+            "effective_round": effective_round_no,
+            "open_round": None if open_round is None else open_round["round"],
+            "round_count": len(history),
+            "decisions": decisions}
 
 
 def all_findings(db: Connection, *, cut: int | None = None,
                  as_of: datetime | None = None) -> dict[str, dict]:
-    return {row["entity_id"]: combine_findings(
-                row["entity_id"], decisions(db, row["entity_id"], cut=cut, as_of=as_of))
+    return {row["entity_id"]: finding(db, row["entity_id"], cut=cut, as_of=as_of)
             for row in current_entities(db, "case", cut=cut, as_of=as_of)}
 
 

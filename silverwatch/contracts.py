@@ -125,6 +125,17 @@ class ReviewDecision(Strict):
     decided_at: datetime
     rationale: Text
     evidence_refs: list[Text] = Field(min_length=1, max_length=30)
+    round: Annotated[int, Field(ge=1, le=1_000)] = 1
+
+
+class ReviewAppeal(Strict):
+    appeal_id: Key
+    case_id: Key
+    requested_by: Key
+    reason: Text
+    submitted_at: datetime
+    new_evidence_refs: list[Text] = Field(default_factory=list, max_length=30)
+    change_summary: Text | None = None
 
 
 class Remediation(Strict):

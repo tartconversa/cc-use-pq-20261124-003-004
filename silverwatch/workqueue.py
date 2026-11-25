@@ -12,23 +12,27 @@ SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 def investigation_queue(db: Connection, *, region: str | None = None,
                         as_of: datetime | None = None, cut: int | None = None) -> dict:
     instant = as_of or datetime.now(timezone.utc)
-    findings = cases.all_findings(db, cut=cut, as_of=instant)
+    findings = cases.all_findings(db, cut=cut)
     touches = {row["entity_id"]: row["payload"]
                for row in current_entities(db, "touch", cut=cut, as_of=instant)}
     items = []
-    for row in cases.current_cases(db, cut=cut, as_of=instant):
+    for row in cases.current_cases(db, cut=cut):
         body = row["payload"]
         batch = touches.get(body["batch_id"])
         if region and (batch is None or batch["region"] != region):
             continue
-        if body["status"] == "closed":
-            continue
         finding = findings[body["case_id"]]
+        under_review = finding["open_round"] is not None
+        if body["status"] == "closed" and not under_review:
+            continue
         submitted_roles = {entry["role"] for entry in finding["decisions"]}
         missing_roles = sorted({"investigator", "compliance"} - submitted_roles)
         material = evidence.for_case(db, body["case_id"], cut=cut)
         age = max((instant - datetime.fromisoformat(body["reported_at"])).days, 0)
         reasons = []
+        if under_review:
+            reasons.append("reopened_after_appeal" if body["status"] != "closed"
+                           else "appeal_round_open")
         if body["severity"] in {"critical", "high"}:
             reasons.append("high_severity")
         if finding["finding"] == "inconclusive":
@@ -42,6 +46,9 @@ def investigation_queue(db: Connection, *, region: str | None = None,
                       "severity": body["severity"], "status": body["status"],
                       "finding": finding["finding"], "age_days": age,
                       "missing_roles": missing_roles, "evidence_count": len(material),
+                      "effective_round": finding["effective_round"],
+                      "open_round": finding["open_round"], "round_count": finding["round_count"],
+                      "under_review": under_review,
                       "reasons": reasons, "event_seq": row["seq"]})
     items.sort(key=lambda item: (SEVERITY_ORDER[item["severity"]], -item["age_days"], item["case_id"]))
     return {"as_of": instant.isoformat(), "cut": cut, "count": len(items), "items": items}

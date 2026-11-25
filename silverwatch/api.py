@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from silverwatch import analysis, cases, channels, comparison, csvio, exports, intake, lineage, ndjson, planning, publication, queries, reconciliation, registry, review, service, trends, workqueue
 from silverwatch.contracts import (AnalysisPolicy, AnalysisRequest, Approval, Case,
                                    CaseEvidence, NeedBatch, Provider, PublishRequest,
-                                   Remediation, ReviewDecision, TouchBatch)
+                                   Remediation, ReviewAppeal, ReviewDecision, TouchBatch)
 from silverwatch.errors import Problem
 from silverwatch.storage import Store
 
@@ -113,6 +113,18 @@ def create_app(database: str | Path = "silverwatch.sqlite3") -> FastAPI:
             raise Problem(422, "case_scope", "URL 与复核案件编号不一致")
         with write() as db:
             return review.decide(db, body)
+
+    @app.post("/cases/{case_id}/appeals")
+    def open_appeal(case_id: str, body: ReviewAppeal):
+        if body.case_id != case_id:
+            raise Problem(422, "case_scope", "URL 与申诉案件编号不一致")
+        with write() as db:
+            return review.open_appeal(db, body)
+
+    @app.get("/cases/{case_id}/reviews")
+    def review_history(case_id: str, cut: int | None = None):
+        with read() as db:
+            return review.review_history(db, case_id, cut=cut)
 
     @app.post("/cases/{case_id}/remediations")
     def add_remediation(case_id: str, body: Remediation):

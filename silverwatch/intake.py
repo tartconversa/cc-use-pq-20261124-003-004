@@ -7,7 +7,8 @@ from typing import Callable
 from pydantic import ValidationError
 
 from silverwatch import evidence, registry, review
-from silverwatch.contracts import Case, CaseEvidence, NeedBatch, Provider, ReviewDecision, TouchBatch
+from silverwatch.contracts import (Case, CaseEvidence, NeedBatch, Provider,
+                                   ReviewAppeal, ReviewDecision, TouchBatch)
 from silverwatch.errors import Problem, invalid
 from silverwatch.ledger import current_cut
 
@@ -17,6 +18,7 @@ HANDLERS: dict[str, tuple[type, Callable]] = {
     "touches": (TouchBatch, registry.register_touch),
     "cases": (Case, None),
     "evidence": (CaseEvidence, evidence.add),
+    "appeals": (ReviewAppeal, review.open_appeal),
     "decisions": (ReviewDecision, review.decide),
 }
 
@@ -43,6 +45,8 @@ def _dispatch(db: Connection, kind: str, model, source: str, revision: int) -> d
         return registry.register_case(db, model.model_dump(mode="json"), source, revision)
     if kind == "evidence":
         return evidence.add(db, model)
+    if kind == "appeals":
+        return review.open_appeal(db, model)
     if kind == "decisions":
         return review.decide(db, model)
     raise invalid("record_kind", "不支持的导入记录类型", {"kind": kind})
@@ -83,6 +87,7 @@ def import_bundle(db: Connection, bundle: dict) -> dict:
                         getattr(model, "batch_id", None) or
                         getattr(model, "case_id", None) or
                         getattr(model, "evidence_id", None) or
+                        getattr(model, "appeal_id", None) or
                         getattr(model, "decision_id", None))
             if identity in seen:
                 raise invalid("duplicate_in_bundle", "同一导入批次不能重复包含同类对象")
